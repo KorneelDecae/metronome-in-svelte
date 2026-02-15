@@ -1,62 +1,116 @@
-import { writable, type Writable, get } from 'svelte/store';
-import { onMount, onDestroy } from 'svelte';
+import { writable, get } from 'svelte/store';
 
-export interface Metronome {
+export type MetronomeState = {
   bpm: number;
   isPlaying: boolean;
-}
+  beat: number;
+  beatsPerMeasure: number;
+};
 
-export function createMetronome(initialBpm = 120, beatsPerMeasure = 4) {
-  const metronome = writable<Metronome>({ bpm: initialBpm, isPlaying: false });
-  let audioCtx: AudioContext;
-  let timeout: ReturnType<typeof setTimeout> | null = null;
-  let currentBeat = 1;
-
-  onMount(() => {
-    audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+export function createMetronome(initialBpm = 120, initialBeats = 4) {
+  const state = writable<MetronomeState>({
+    bpm: initialBpm,
+    isPlaying: false,
+    beat: 0,
+    beatsPerMeasure: initialBeats
   });
 
-  function playClick(): void {
-    if (!audioCtx) return;
+  let audioContext: AudioContext | null = null;
+  let intervalId: number | null = null;
+  let currentBeat = 0;
 
-    const oscillator = audioCtx.createOscillator();
-    const gainNode = audioCtx.createGain();
+  function playClick(accent = false) {
+    if (!audioContext) return;
 
-    oscillator.connect(gainNode);
-    gainNode.connect(audioCtx.destination);
+    const osc = audioContext.createOscillator();
+    const gain = audioContext.createGain();
 
-    oscillator.type = 'square';
-    oscillator.frequency.setValueAtTime(currentBeat === 1 ? 1500 : 1000, audioCtx.currentTime);
-    gainNode.gain.setValueAtTime(0.2, audioCtx.currentTime);
+    osc.type = 'square';
+    osc.frequency.value = accent ? 1400 : 900;
 
-    oscillator.start();
-    oscillator.stop(audioCtx.currentTime + 0.05);
+    gain.gain.setValueAtTime(1, audioContext.currentTime);
+    gain.gain.exponentialRampToValueAtTime(
+      0.001,
+      audioContext.currentTime + 0.05
+    );
 
-    currentBeat = currentBeat < beatsPerMeasure ? currentBeat + 1 : 1;
+    osc.connect(gain);
+    gain.connect(audioContext.destination);
+
+    osc.start();
+    osc.stop(audioContext.currentTime + 0.05);
   }
 
   function tick() {
-    playClick();
+    const { beatsPerMeasure } = get(state);
 
-    const bpmValue = get(metronome).bpm;
-    timeout = setTimeout(tick, 60000 / bpmValue);
+    const isAccent = currentBeat === 0;
+    playClick(isAccent);
+
+    state.update(s => ({
+      ...s,
+      beat: currentBeat
+    }));
+
+    currentBeat = (currentBeat + 1) % beatsPerMeasure;
   }
 
   function start() {
-    metronome.update(s => ({ ...s, isPlaying: true }));
-    currentBeat = 1;
-    tick();
+    if (get(state).isPlaying) return;
+
+    audioContext = new AudioContext();
+    currentBeat = 0;
+
+    state.update(s => ({ ...s, isPlaying: true }));
+
+    restartInterval();
   }
 
   function stop() {
-    metronome.update(s => ({ ...s, isPlaying: false }));
-    if (timeout) clearTimeout(timeout);
-    timeout = null;
+    if (intervalId) clearInterval(intervalId);
+    intervalId = null;
+
+    audioContext?.close();
+    audioContext = null;
+
+    state.update(s => ({
+      ...s,
+      isPlaying: false,
+      beat: 0
+    }));
   }
 
-  onDestroy(() => {
-    if (timeout) clearTimeout(timeout);
-  });
+  function restartInterval() {
+    if (intervalId) clearInterval(intervalId);
 
-  return { metronome, start, stop, playClick };
+    const { bpm } = get(state);
+    const interval = (60 / bpm) * 1000;
+
+    intervalId = window.setInterval(tick, interval);
+  }
+
+  let previousBeats = initialBeats;
+
+state.subscribe(s => {
+  if (s.isPlaying) {
+    restartInterval();
+  }
+
+  if (s.beatsPerMeasure !== previousBeats) {
+    currentBeat = 0;
+
+    state.update(st => ({
+      ...st,
+      beat: 0
+    }));
+
+    previousBeats = s.beatsPerMeasure;
+  }
+});
+
+  return {
+    metronome: state,
+    start,
+    stop
+  };
 }
